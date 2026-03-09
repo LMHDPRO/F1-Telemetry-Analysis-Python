@@ -1,7 +1,7 @@
 """
-F1 Pro Dashboard  v4.4
+F1 Pro Dashboard  v4.7
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIXES v4.4.0:
+
 """
 import tkinter as tk
 from tkinter import ttk, Canvas, messagebox
@@ -309,11 +309,12 @@ def _simulate_ers_segment(soc_kj: float,
 
         if on_straight[k]:
             if soc_pct <= ERS_CLIP_SOC_THRESH:
-                # Superclipping: ICE intenta recargar → no hay deploy eléctrico
+                # SUPERCLIPPING: ERS deploy cortado → ICE carga la batería
+                # El ICE recarga a ~1/3 de la potencia de deploy normal
                 d_kw = 0.0
                 clip_flag = True
-                # En superclipping el MGU-H sigue regenerando desde turbo
-                net = float(r_mgu_h_arr[k]) * dk
+                # Regen total: MGU-H (turbo) + carga ICE forzada (~110 kW)
+                net = (float(r_mgu_h_arr[k]) + 110.0) * dk
             else:
                 clip_flag = False
                 net = float(r_mgu_h_arr[k]) * dk - d_kw * dk
@@ -367,6 +368,9 @@ class Snap:
     in_pit:       bool  = False
     pit_out_lap:  bool  = False
     lap_type:     str   = ""   # "PUSH", "OUT LAP", "IN LAP", ""
+    # Timing display
+    last_lap_str: str   = "–"
+    best_lap_str: str   = "–"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -623,6 +627,28 @@ class SnapshotWorker(threading.Thread):
 
         max_lap = max((s.lap for s in snaps), default=0)
 
+        # ── Last lap / Best lap strings para el timing ─────────────────────
+        for s in snaps:
+            drv_lps = dash._laps_by_driver.get(s.drv, pd.DataFrame())
+            if drv_lps.empty:
+                continue
+            try:
+                lap_times_s = dash._lap_times.get(s.drv, np.array([]))
+                if len(lap_times_s) > 0:
+                    idx_l = int(np.searchsorted(lap_times_s, abs_t, side='right'))
+                    if "LapTime" in drv_lps.columns:
+                        lt_all = drv_lps["LapTime"].to_numpy(dtype=float)
+                        # Last lap: vuelta recién completada
+                        ll_idx = min(idx_l, len(lt_all) - 1)
+                        if ll_idx >= 0 and not math.isnan(lt_all[ll_idx]):
+                            s.last_lap_str = fmt_lap(float(lt_all[ll_idx]))
+                        # Best lap: mínimo de todas las completadas
+                        valid_lt = lt_all[:idx_l+1][~np.isnan(lt_all[:idx_l+1])]
+                        if len(valid_lt):
+                            s.best_lap_str = fmt_lap(float(np.min(valid_lt)))
+            except Exception:
+                pass
+
         return {
             "elapsed":     elapsed,
             "abs_t":       abs_t,
@@ -643,7 +669,7 @@ class F1Dashboard:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("F1 Pro Dashboard  v4.4  •  Telemetría & Timing")
+        self.root.title("F1 Pro Dashboard  v4.5  •  Telemetría & Timing")
 
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
@@ -854,122 +880,120 @@ class F1Dashboard:
         self._build_right_panel(main)
 
     def _build_left_panel(self, parent) -> None:
-        left = tk.Frame(parent, bg=BG_DARK)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        left.rowconfigure(1, weight=1)
+        left = tk.Frame(parent, bg=BG_DARK, width=444)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        left.grid_propagate(False)        # bloquea SOLO el ancho (width=444)
         left.columnconfigure(0, weight=1)
+        left.rowconfigure(1, weight=1)    # el tree crece; race admin se queda abajo
 
-        sb = tk.Frame(left, bg=BG_PANEL, height=38)
-        sb.grid(row=0, column=0, sticky="ew", pady=(0, 4))
-        sb.pack_propagate(False)
-        self.lbl_race_status = tk.Label(sb, text="⬜ NO SESSION",
+        sb = tk.Frame(left, bg=BG_PANEL)
+        sb.grid(row=0, column=0, sticky="ew", pady=(0, 3))
+
+        sb_top = tk.Frame(sb, bg=BG_PANEL)
+        sb_top.pack(fill=tk.X)
+        self.lbl_race_status = tk.Label(sb_top, text="⬜ NO SESSION",
             bg=BG_PANEL, fg=TEXT_SEC, font=(FONT, 12, "bold"), anchor="w", width=22)
         self.lbl_race_status.pack(side=tk.LEFT, padx=8)
-        self.lbl_laps = tk.Label(sb, text="LAP — / —",
+        self.lbl_laps = tk.Label(sb_top, text="LAP — / —",
             bg=BG_PANEL, fg=TEXT_PRI, font=(FONT, 12, "bold"))
         self.lbl_laps.pack(side=tk.LEFT, padx=10)
-        self.lbl_weather = tk.Label(sb, text="Air —°C | Track —°C | ☀ —",
-            bg=BG_PANEL, fg=TEXT_SEC, font=(FONT, 9), anchor="e")
-        self.lbl_weather.pack(side=tk.RIGHT, padx=8)
+
+        self.lbl_weather = tk.Label(sb, text="Air —°C  |  Track —°C  |  ☀ Dry",
+            bg=BG_PANEL, fg=TEXT_SEC, font=(FONT, 9), anchor="w")
+        self.lbl_weather.pack(fill=tk.X, padx=8, pady=(0, 2))
 
         tf = tk.Frame(left, bg=BG_DARK)
         tf.grid(row=1, column=0, sticky="nsew")
-        tf.rowconfigure(0, weight=1)
         tf.columnconfigure(0, weight=1)
-        tf.columnconfigure(1, weight=0)
+        tf.rowconfigure(0, weight=1)
 
-        cols = ("Pos", "No", "DRV", "Team", "Gap", "Int", "Speed", "Tyre", "Lap")
-        self.tree = ttk.Treeview(tf, columns=cols, show="headings",
+        self._timing_mode = "race"
+        cols_race   = ("Pos", "No", "DRV", "Team", "Gap", "Int", "Last Lap", "Tyre", "Lap")
+        widths_race = {"Pos": 26, "No": 26, "DRV": 36, "Team": 82,
+                       "Gap": 56, "Int": 56, "Last Lap": 72, "Tyre": 34, "Lap": 26}
+        self.tree = ttk.Treeview(tf, columns=cols_race, show="headings",
                                  height=22, selectmode="browse")
-        widths = {"Pos": 32, "No": 30, "DRV": 46, "Team": 96,
-                  "Gap": 68, "Int": 62, "Speed": 68, "Tyre": 44, "Lap": 36}
-        for c in cols:
+        for c in cols_race:
             self.tree.heading(c, text=c, anchor=tk.CENTER)
-            self.tree.column(c, width=widths[c],
+            self.tree.column(c, width=widths_race[c], minwidth=0,
                              anchor=tk.W if c == "Team" else tk.CENTER,
                              stretch=False)
-        vsb = ttk.Scrollbar(tf, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
         self.tree.bind("<<TreeviewSelect>>", self._on_driver_select)
 
         self._build_left_bottom_panel(left)
 
+
     def _build_left_bottom_panel(self, parent) -> None:
-        """Race Administration — panel inferior izquierdo."""
-        frm = tk.Frame(parent, bg=BG_CARD, padx=7, pady=5)
-        frm.grid(row=2, column=0, sticky="ew", pady=(4, 0))
-
+        """Race Administration — panel inferior izquierdo, compacto."""
+        frm = tk.Frame(parent, bg=BG_CARD, padx=6, pady=3)
+        frm.grid(row=2, column=0, sticky="ew", pady=(3, 0))
         tk.Label(frm, text="RACE ADMINISTRATION", bg=BG_CARD, fg=ACCENT,
-                 font=(FONT, 10, "bold"), anchor="w").pack(fill=tk.X, pady=(0, 3))
+                 font=(FONT, 9, "bold"), anchor="w").pack(fill=tk.X, pady=(0, 2))
 
-        # ── Pit Status ────────────────────────────────────────────────────────
-        pit_row = tk.Frame(frm, bg=BG_CARD)
-        pit_row.pack(fill=tk.X)
-        tk.Label(pit_row, text="PIT:", bg=BG_CARD, fg=TEXT_SEC,
-                 font=(FONT, 8, "bold"), anchor="w").pack(side=tk.LEFT)
-        self.lbl_lb_pit = tk.Label(pit_row, text="ON TRACK",
-            bg=BG_CARD, fg=GREEN, font=(FONT, 9, "bold"), anchor="e")
-        self.lbl_lb_pit.pack(side=tk.RIGHT)
+        # ── Fila 1: PIT status + TYRE en la misma línea ───────────────────────
+        row1 = tk.Frame(frm, bg=BG_CARD)
+        row1.pack(fill=tk.X)
+        pit_sub = tk.Frame(row1, bg=BG_CARD)
+        pit_sub.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(pit_sub, text="PIT:", bg=BG_CARD, fg=TEXT_SEC,
+                 font=(FONT, 7, "bold")).pack(side=tk.LEFT)
+        self.lbl_lb_pit = tk.Label(pit_sub, text="ON TRACK",
+            bg=BG_CARD, fg=GREEN, font=(FONT, 8, "bold"))
+        self.lbl_lb_pit.pack(side=tk.LEFT, padx=(4, 0))
+        tyre_sub = tk.Frame(row1, bg=BG_CARD)
+        tyre_sub.pack(side=tk.RIGHT)
+        tk.Label(tyre_sub, text="TYRE:", bg=BG_CARD, fg=TEXT_SEC,
+                 font=(FONT, 7, "bold")).pack(side=tk.LEFT)
+        self.lbl_lb_tyre = tk.Label(tyre_sub, text="—",
+            bg=BG_CARD, fg=TEXT_PRI, font=(FONT, 8, "bold"))
+        self.lbl_lb_tyre.pack(side=tk.LEFT, padx=(3, 0))
 
-        # ── Neumático: nombre + cambio ────────────────────────────────────────
-        tyre_row = tk.Frame(frm, bg=BG_CARD)
-        tyre_row.pack(fill=tk.X, pady=(2, 0))
-        tk.Label(tyre_row, text="TYRE:", bg=BG_CARD, fg=TEXT_SEC,
-                 font=(FONT, 8, "bold"), anchor="w").pack(side=tk.LEFT)
-        self.lbl_lb_tyre = tk.Label(tyre_row, text="—",
-            bg=BG_CARD, fg=TEXT_PRI, font=(FONT, 9, "bold"), anchor="e")
-        self.lbl_lb_tyre.pack(side=tk.RIGHT)
-
-        # Fila: Age + Pits
-        age_row = tk.Frame(frm, bg=BG_CARD)
-        age_row.pack(fill=tk.X)
-        self.lbl_lb_tyre_age = tk.Label(age_row, text="Age: — laps  |  Pits: —",
-            bg=BG_CARD, fg=TEXT_SEC, font=(FONT, 8), anchor="w")
+        # ── Fila 2: Age + Pits + cambio de compuesto ─────────────────────────
+        row2 = tk.Frame(frm, bg=BG_CARD)
+        row2.pack(fill=tk.X)
+        self.lbl_lb_tyre_age = tk.Label(row2, text="Age: — laps  |  Pits: —",
+            bg=BG_CARD, fg=TEXT_SEC, font=(FONT, 7), anchor="w")
         self.lbl_lb_tyre_age.pack(side=tk.LEFT)
-        self.lbl_lb_tyre_change = tk.Label(age_row, text="",
-            bg=BG_CARD, fg=ORANGE, font=(FONT, 8, "bold"), anchor="e")
+        self.lbl_lb_tyre_change = tk.Label(row2, text="",
+            bg=BG_CARD, fg=ORANGE, font=(FONT, 7, "bold"), anchor="e")
         self.lbl_lb_tyre_change.pack(side=tk.RIGHT)
 
-        # ── Barra de desgaste del neumático ──────────────────────────────────
-        # Empieza en negro, se llena de izq a der según las laps en este stint.
-        # Color: verde (0-10L) → amarillo (10-25L) → naranja (25-35L) → rojo (35+L)
-        tk.Label(frm, text="TYRE WEAR", bg=BG_CARD, fg=TEXT_SEC,
+        # ── Tyre History bar ──────────────────────────────────────────────────
+        tk.Label(frm, text="TYRE HISTORY", bg=BG_CARD, fg=TEXT_SEC,
                  font=(FONT, 7, "bold"), anchor="w").pack(fill=tk.X)
-        self.cvs_lb_tyre_wear = tk.Canvas(frm, height=14, bg="#050505",
+        self.cvs_lb_tyre_wear = tk.Canvas(frm, height=18, bg="#050505",
                                            highlightthickness=1,
                                            highlightbackground="#333355")
-        self.cvs_lb_tyre_wear.pack(fill=tk.X, pady=(1, 4))
+        self.cvs_lb_tyre_wear.pack(fill=tk.X, pady=(1, 3))
 
-        tk.Frame(frm, bg="#2a2a4a", height=1).pack(fill=tk.X, pady=(0, 3))
+        tk.Frame(frm, bg="#2a2a4a", height=1).pack(fill=tk.X, pady=(0, 2))
 
         # ── ERS Battery ───────────────────────────────────────────────────────
         ers_hdr = tk.Frame(frm, bg=BG_CARD)
         ers_hdr.pack(fill=tk.X)
-        tk.Label(ers_hdr, text="⚡ ERS BATTERY", bg=BG_CARD, fg=ACCENT2,
-                 font=(FONT, 8, "bold"), anchor="w").pack(side=tk.LEFT)
+        tk.Label(ers_hdr, text="⚡ ERS", bg=BG_CARD, fg=ACCENT2,
+                 font=(FONT, 7, "bold"), anchor="w").pack(side=tk.LEFT)
         self.lbl_lb_ers_pct = tk.Label(ers_hdr, text="0%",
-            bg=BG_CARD, fg=GREEN, font=(FONT, 9, "bold"), anchor="e")
+            bg=BG_CARD, fg=GREEN, font=(FONT, 8, "bold"), anchor="e")
         self.lbl_lb_ers_pct.pack(side=tk.RIGHT)
 
-        self.cvs_lb_ers = tk.Canvas(frm, height=16, bg="#050510",
+        self.cvs_lb_ers = tk.Canvas(frm, height=14, bg="#050510",
                                     highlightthickness=1,
                                     highlightbackground="#1a3a5e")
-        self.cvs_lb_ers.pack(fill=tk.X, pady=(2, 2))
+        self.cvs_lb_ers.pack(fill=tk.X, pady=(1, 2))
 
-        # Deploy / Regen en kW instantáneo (no kJ acumulado)
         dep_reg = tk.Frame(frm, bg=BG_CARD)
         dep_reg.pack(fill=tk.X)
-        self.lbl_lb_deploy = tk.Label(dep_reg, text="↓ Deploy:  — kW",
-            bg=BG_CARD, fg=ORANGE, font=(FONT, 8, "bold"), anchor="w")
+        self.lbl_lb_deploy = tk.Label(dep_reg, text="↓ Deploy: — kW",
+            bg=BG_CARD, fg=ORANGE, font=(FONT, 7, "bold"), anchor="w")
         self.lbl_lb_deploy.pack(side=tk.LEFT)
-        self.lbl_lb_regen = tk.Label(dep_reg, text="↑ Regen:  — kW",
-            bg=BG_CARD, fg=GREEN, font=(FONT, 8, "bold"), anchor="e")
+        self.lbl_lb_regen = tk.Label(dep_reg, text="↑ Regen: — kW",
+            bg=BG_CARD, fg=GREEN, font=(FONT, 7, "bold"), anchor="e")
         self.lbl_lb_regen.pack(side=tk.RIGHT)
 
         self.lbl_lb_ers_status = tk.Label(frm, text="",
-            bg=BG_CARD, fg=TEXT_SEC, font=(FONT, 8, "bold"), anchor="w")
+            bg=BG_CARD, fg=TEXT_SEC, font=(FONT, 7, "bold"), anchor="w")
         self.lbl_lb_ers_status.pack(fill=tk.X)
 
     def _build_right_panel(self, parent) -> None:
@@ -1136,103 +1160,106 @@ class F1Dashboard:
         self.plot_canvas.pack(fill=tk.BOTH, expand=False, padx=4, pady=(0, 4))
 
     def _build_analysis_panel(self, parent) -> None:
-        """Panel de análisis fusionado: Sectors vs Prev Lap + Pace & Style History."""
-        row = tk.Frame(parent, bg=BG_DARK)
-        row.pack(fill=tk.X)
+        """Panel unificado PACE & ANALYSIS: Sectors(izq) + Pace/Insights(centro) + Style(der)."""
+        outer = tk.Frame(parent, bg=BG_CARD, pady=4, padx=6)
+        outer.pack(fill=tk.BOTH, expand=True)
 
-        # ── Panel izquierdo: Sectors vs Previous Lap (ampliado) ──────────────
-        sec_f = tk.Frame(row, bg=BG_CARD, padx=8, pady=6)
-        sec_f.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
-
-        sec_hdr = tk.Frame(sec_f, bg=BG_CARD)
-        sec_hdr.pack(fill=tk.X, pady=(0, 3))
-        tk.Label(sec_hdr, text="SECTORS  vs  PREVIOUS LAP", bg=BG_CARD,
+        # Título + track cond
+        hdr = tk.Frame(outer, bg=BG_CARD)
+        hdr.pack(fill=tk.X, pady=(0, 3))
+        tk.Label(hdr, text="PACE & ANALYSIS", bg=BG_CARD,
                  fg=ACCENT, font=(FONT, 10, "bold"), anchor="w").pack(side=tk.LEFT)
-        self.lbl_track_cond = tk.Label(sec_hdr, text="Track: —",
-            bg=BG_CARD, fg=GREEN, font=(FONT, 9, "bold"), anchor="e")
+        self.lbl_track_cond = tk.Label(hdr, text="Track: —",
+            bg=BG_CARD, fg=GREEN, font=(FONT, 9, "bold"))
         self.lbl_track_cond.pack(side=tk.RIGHT)
 
-        # Tabla de sectores — sin Tyre/Age/Pits (movidos a Race Admin)
-        sec_cols = ("S", "Time", "Δ", "Verdict", "Cond")
+        row = tk.Frame(outer, bg=BG_CARD)
+        row.pack(fill=tk.BOTH, expand=True)
+
+        # ── COLUMNA IZQUIERDA: Sectors vs Prev Lap ────────────────────────────
+        sec_f = tk.Frame(row, bg=BG_CARD, padx=4)
+        sec_f.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+
+        tk.Label(sec_f, text="SECTORS  vs  PREV LAP", bg=BG_CARD,
+                 fg=TEXT_SEC, font=(FONT, 8, "bold"), anchor="w").pack(fill=tk.X, pady=(0, 2))
+
+        # height=4: S1/S2/S3 + fila Avg
+        sec_cols = ("S", "Time", "Δ", "Verdict")
         self.tree_sec = ttk.Treeview(sec_f, columns=sec_cols, show="headings",
-                                     height=3, selectmode="none")
-        sec_w = {"S": 22, "Time": 78, "Δ": 72, "Verdict": 120, "Cond": 72}
+                                     height=4, selectmode="none")
+        sec_w = {"S": 22, "Time": 74, "Δ": 66, "Verdict": 108}
         for c in sec_cols:
-            self.tree_sec.heading(c, text=c)
+            self.tree_sec.heading(c, text=c, anchor=tk.CENTER)
             self.tree_sec.column(c, width=sec_w[c], anchor=tk.CENTER, stretch=False)
-        for tag, fg in (("f1_purple", F1_PURPLE), ("f1_green", F1_GREEN),
-                        ("f1_yellow", F1_YELLOW), ("f1_white", F1_WHITE)):
-            self.tree_sec.tag_configure(tag, foreground=fg)
+        for tag, fg2 in (("f1_purple", F1_PURPLE), ("f1_green", F1_GREEN),
+                         ("f1_yellow", F1_YELLOW), ("f1_white", F1_WHITE)):
+            self.tree_sec.tag_configure(tag, foreground=fg2)
         self.tree_sec.tag_configure("sc_active",  foreground=ORANGE,  background="#1a0e00")
         self.tree_sec.tag_configure("vsc_active", foreground=PURPLE,  background="#110022")
         self.tree_sec.tag_configure("yellow_sec", foreground=YELLOW,  background="#1a1a00")
         self.tree_sec.tag_configure("red_flag",   foreground=ACCENT,  background="#1a0000")
-        self.tree_sec.pack(fill=tk.X, pady=(0, 3))
+        self.tree_sec.tag_configure("avg_row",    foreground=TEXT_SEC, background="#0c0c1c")
+        self.tree_sec.pack(fill=tk.X, pady=(0, 2))
 
-        # Avg sector time label
-        self.lbl_sec_avg = tk.Label(sec_f, text="Avg S1/S2/S3: — / — / —",
-            bg=BG_CARD, fg=TEXT_SEC, font=(FONT, 8), anchor="w")
+        self.lbl_sec_avg = tk.Label(sec_f, text="Avg: — / — / —",
+            bg=BG_CARD, fg=TEXT_SEC, font=(FONT, 7), anchor="w")
         self.lbl_sec_avg.pack(fill=tk.X)
 
-        # Separador y Pace block dentro del mismo panel
-        tk.Frame(sec_f, bg="#2a2a4a", height=1).pack(fill=tk.X, pady=(4, 3))
-        tk.Label(sec_f, text="PACE & ANALYSIS", bg=BG_CARD,
-                 fg=ACCENT, font=(FONT, 10, "bold"), anchor="w").pack(fill=tk.X, pady=(0, 2))
+        # ── COLUMNA CENTRAL: Pace & Insights ─────────────────────────────────
+        pace_f = tk.Frame(row, bg=BG_CARD, padx=6)
+        pace_f.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.lbl_pace = tk.Label(sec_f, text="Pace (5L avg): —",
+        self.lbl_pace = tk.Label(pace_f, text="Pace (5L avg): —",
             bg=BG_CARD, fg=TEXT_PRI, font=(FONT, 10, "bold"), anchor="w")
         self.lbl_pace.pack(fill=tk.X)
 
-        self.lbl_last_lap = tk.Label(sec_f, text="Last: —  |  Best: —",
-            bg=BG_CARD, fg=TEXT_SEC, font=(FONT, 10), anchor="w")
-        self.lbl_last_lap.pack(fill=tk.X, pady=(1, 2))
+        self.lbl_last_lap = tk.Label(pace_f, text="Last: —  |  Best: —",
+            bg=BG_CARD, fg=TEXT_SEC, font=(FONT, 9), anchor="w")
+        self.lbl_last_lap.pack(fill=tk.X, pady=(1, 3))
 
-        self.lbl_diag = tk.Label(sec_f, text="Behaviour: —",
-            bg=BG_CARD, fg=ACCENT2, font=(FONT, 9, "bold"), anchor="w",
-            wraplength=300, justify="left")
+        tk.Frame(pace_f, bg="#2a2a4a", height=1).pack(fill=tk.X, pady=(0, 3))
+
+        self.lbl_diag = tk.Label(pace_f, text="—",
+            bg=BG_CARD, fg=ACCENT2, font=(FONT, 8, "bold"), anchor="w",
+            wraplength=340, justify="left")
         self.lbl_diag.pack(fill=tk.X)
 
-        # ── Panel derecho: Driving Style History ──────────────────────────────
-        style_f = tk.Frame(row, bg=BG_CARD, padx=8, pady=6)
-        style_f.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        # ── COLUMNA DERECHA: Driving Style History ────────────────────────────
+        style_f = tk.Frame(row, bg=BG_CARD, padx=6, width=490)
+        style_f.pack(side=tk.RIGHT, fill=tk.Y)
+        style_f.pack_propagate(False)
 
         tk.Label(style_f, text="DRIVING STYLE HISTORY", bg=BG_CARD,
-                 fg=ACCENT, font=(FONT, 10, "bold"), anchor="w").pack(fill=tk.X, pady=(0, 3))
+                 fg=ACCENT, font=(FONT, 9, "bold"), anchor="w").pack(fill=tk.X, pady=(0, 2))
 
-        # Tabla invertida (última vuelta arriba → insert en pos 0) con columnas más legibles
-        style_cols = ("Lap", "LiCo%", "Clip%", "Push%", "Brk%", "Lap Time", "Δ Best", "Cond")
+        style_cols = ("Lap", "LiCo%", "Clip%", "Push%", "Brk%", "Lap Time", "\u0394 Best", "Cond")
         self.tree_style = ttk.Treeview(style_f, columns=style_cols,
-                                       show="headings", height=8, selectmode="none")
-        style_w = {"Lap": 34, "LiCo%": 52, "Clip%": 52, "Push%": 52, "Brk%": 48,
-                   "Lap Time": 72, "Δ Best": 64, "Cond": 58}
+                                       show="headings", height=7, selectmode="none")
+        style_w = {"Lap": 30, "LiCo%": 48, "Clip%": 48, "Push%": 48, "Brk%": 44,
+                   "Lap Time": 68, "\u0394 Best": 60, "Cond": 54}
         for c in style_cols:
-            self.tree_style.heading(c, text=c)
+            self.tree_style.heading(c, text=c, anchor=tk.CENTER)
             self.tree_style.column(c, width=style_w[c], anchor=tk.CENTER, stretch=False)
-        for tag, fg in (("f1_purple", F1_PURPLE), ("f1_green", F1_GREEN),
-                        ("f1_yellow", F1_YELLOW), ("f1_white", F1_WHITE)):
-            self.tree_style.tag_configure(tag, foreground=fg)
-        self.tree_style.tag_configure("high_clip",     foreground=PURPLE, background="#150030")
-        self.tree_style.tag_configure("superclip",     foreground="#ffffff", background="#550000")
-        self.tree_style.tag_configure("sc_lap",        foreground=ORANGE)
-        self.tree_style.tag_configure("vsc_lap",       foreground="#cc88ff")
-        self.tree_style.tag_configure("yellow_lap",    foreground=YELLOW)
-        self.tree_style.tag_configure("red_lap",       foreground=ACCENT)
-        self.tree_style.pack(fill=tk.BOTH, expand=True)
+        for tag, fg2 in (("f1_purple", F1_PURPLE), ("f1_green", F1_GREEN),
+                         ("f1_yellow", F1_YELLOW), ("f1_white", F1_WHITE)):
+            self.tree_style.tag_configure(tag, foreground=fg2)
+        self.tree_style.tag_configure("high_clip",  foreground=PURPLE, background="#150030")
+        self.tree_style.tag_configure("superclip",  foreground="#ffffff", background="#550000")
+        self.tree_style.tag_configure("sc_lap",     foreground=ORANGE)
+        self.tree_style.tag_configure("vsc_lap",    foreground="#cc88ff")
+        self.tree_style.tag_configure("yellow_lap", foreground=YELLOW)
+        self.tree_style.tag_configure("red_lap",    foreground=ACCENT)
+        self.tree_style.pack(fill=tk.X)
 
-        # Leyenda de colores de clipping
         leg = tk.Frame(style_f, bg=BG_CARD)
-        leg.pack(fill=tk.X, pady=(2, 0))
-        tk.Label(leg, text="█ SUPERCLIP", bg=BG_CARD, fg="#ff4444",
-                 font=(FONT, 7, "bold")).pack(side=tk.LEFT, padx=(0, 8))
-        tk.Label(leg, text="█ CLIP", bg=BG_CARD, fg=PURPLE,
-                 font=(FONT, 7, "bold")).pack(side=tk.LEFT, padx=(0, 8))
-        tk.Label(leg, text="█ BEST", bg=BG_CARD, fg=F1_PURPLE,
-                 font=(FONT, 7, "bold")).pack(side=tk.LEFT)
+        leg.pack(fill=tk.X, pady=(3, 0))
+        for txt, col in [("\u2588 SUPERCLIP", "#ff4444"), ("\u2588 CLIP", PURPLE),
+                         ("\u2588 BEST LAP", F1_PURPLE), ("\u2588 FAST", F1_GREEN),
+                         ("\u2588 SC/VSC", ORANGE)]:
+            tk.Label(leg, text=txt, bg=BG_CARD, fg=col,
+                     font=(FONT, 7, "bold")).pack(side=tk.LEFT, padx=(0, 5))
 
-        # Referencia lbl_tyre — mantener para compatibilidad con _update_analysis
-        self.lbl_tyre = tk.Label(style_f, text="", bg=BG_CARD, fg=BG_CARD,
-                                  font=(FONT, 1))   # invisible, solo compatibilidad
-
+        self.lbl_tyre = tk.Label(style_f, text="", bg=BG_CARD, fg=BG_CARD, font=(FONT, 1))
     # ════════════════════════════════════════════════════════════════════════
     #  ZOOM / PAN MAPA
     # ════════════════════════════════════════════════════════════════════════
@@ -1448,6 +1475,9 @@ class F1Dashboard:
         self.lbl_map_badge.configure(text=f" ◉ {si[0]} ", bg=si[2], fg=TEXT_PRI)
         self._refresh_badge(sess_type)
 
+        # Reconfigurar columnas del timing según tipo de sesión
+        self._reconfigure_timing_columns(sess_type)
+
         for row in self.tree.get_children(): self.tree.delete(row)
         for drv in self.drivers:
             ref  = self.telemetry[drv].iloc[0]
@@ -1455,9 +1485,11 @@ class F1Dashboard:
             col  = TEAM_COLORS.get(team, TEXT_PRI)
             tag  = f"t_{drv}"
             self.tree.tag_configure(tag, foreground=col)
+            # 9 valores para race (Gap+Int), 8 para quali (BestLap+Gap)
+            n_cols = 9 if sess_type in ("R", "S") else 8
             self.tree.insert("", "end", iid=drv,
                 values=("–", ref.get("Number","–"), ref.get("Abbr","–"),
-                        team, "–", "–", "–", "–", "–"), tags=(tag,))
+                        team, *["–"]*(n_cols - 4)), tags=(tag,))
 
         if self.drivers:
             self.selected_driver = self.drivers[0]
@@ -1466,6 +1498,32 @@ class F1Dashboard:
         self._set_status(
             f"Loaded  •  {len(self.drivers)} drivers  •  {self.total_laps} laps  •  {si[0]}")
         self._request_update(0)
+
+    # ════════════════════════════════════════════════════════════════════════
+    #  TIMING COLUMNS — reconfigura según tipo de sesión
+    # ════════════════════════════════════════════════════════════════════════
+    def _reconfigure_timing_columns(self, sess_type: str) -> None:
+        is_race = sess_type in ("R", "S")
+        self._timing_mode = "race" if is_race else "quali"
+
+        if is_race:
+            # CARRERA: Pos, No, DRV, Team, Gap(al líder), Int(al de adelante), Last Lap, Tyre, Lap
+            cols   = ("Pos", "No", "DRV", "Team", "Gap", "Int", "Last Lap", "Tyre", "Lap")
+            widths = {"Pos": 26, "No": 26, "DRV": 36, "Team": 82,
+                      "Gap": 56, "Int": 56, "Last Lap": 72, "Tyre": 34, "Lap": 26}
+        else:
+            # PRACTICE/QUALI: Pos, No, DRV, Team, Best Lap, Gap(vs mejor), Tyre, Lap
+            cols   = ("Pos", "No", "DRV", "Team", "Best Lap", "Gap", "Tyre", "Lap")
+            widths = {"Pos": 26, "No": 26, "DRV": 36, "Team": 82,
+                      "Best Lap": 80, "Gap": 64, "Tyre": 34, "Lap": 26}
+
+        self.tree["columns"] = cols
+        self.tree["show"] = "headings"
+        for c in cols:
+            self.tree.heading(c, text=c, anchor=tk.CENTER)
+            self.tree.column(c, width=widths[c], minwidth=0,
+                             anchor=tk.W if c == "Team" else tk.CENTER,
+                             stretch=False)
 
     # ════════════════════════════════════════════════════════════════════════
     #  MAPA
@@ -1647,12 +1705,38 @@ class F1Dashboard:
 
         for i, s in enumerate(snaps):
             if not self.tree.exists(s.drv): continue
-            self.tree.item(s.drv, values=(
-                "–" if s.is_out else str(i+1),
-                s.number, s.abbr, s.team,
-                s.gap, s.interval,
-                "OUT" if s.is_out else str(int(s.speed)),
-                s.tyre, s.lap))
+            if self._timing_mode == "race":
+                # CARRERA: Pos, No, DRV, Team, Gap, Int, Last Lap, Tyre, Lap
+                self.tree.item(s.drv, values=(
+                    "–" if s.is_out else str(i+1),
+                    s.number, s.abbr, s.team,
+                    "OUT" if s.is_out else s.gap,
+                    "OUT" if s.is_out else s.interval,
+                    getattr(s, 'last_lap_str', '–'),
+                    s.tyre, s.lap))
+            else:
+                # QUALI/PRACTICE: Pos, No, DRV, Team, Best Lap, Gap(vs best), Tyre, Lap
+                best_str = getattr(s, 'best_lap_str', '–')
+                # Gap vs session best en quali
+                try:
+                    best_f = float(best_str.replace("–","").replace(":","")) if best_str != "–" else float("nan")
+                except Exception:
+                    best_f = float("nan")
+                gap_q = "–"
+                if self.session_best_s and not math.isnan(best_f) and best_str != "–":
+                    # Recalculate gap from stored best lap time
+                    dl_q = self._laps_by_driver.get(s.drv, pd.DataFrame())
+                    if not dl_q.empty and "LapTime" in dl_q.columns:
+                        lt_q = dl_q["LapTime"].to_numpy(dtype=float)
+                        valid_q = lt_q[~np.isnan(lt_q)]
+                        if len(valid_q):
+                            d = float(np.min(valid_q)) - self.session_best_s
+                            gap_q = "BEST" if abs(d) < 0.01 else f"+{d:.3f}"
+                self.tree.item(s.drv, values=(
+                    "–" if s.is_out else str(i+1),
+                    s.number, s.abbr, s.team,
+                    best_str, gap_q,
+                    s.tyre, s.lap))
             self.tree.move(s.drv, "", i)
         self.lbl_laps.configure(text=f"LAP {max_lap} / {self.total_laps}")
 
@@ -1850,14 +1934,17 @@ class F1Dashboard:
     # ════════════════════════════════════════════════════════════════════════
     def _update_left_bottom_panel(self, snap: Snap) -> None:
         # ── Pit Status ────────────────────────────────────────────────────────
-        if snap.in_pit:
+        is_race_sess = self.session_type in ("R", "S")
+        # Reactivo: si ya aceleró sobre 82km/h, marcarlo como ON TRACK inmediatamente
+        in_pit_display = snap.in_pit and snap.speed <= 90
+        if in_pit_display:
             spd_lbl = "60 km/h PIT LIMITER" if snap.speed <= 62 else "80 km/h PIT LIMITER"
             pit_txt = f"🔧 IN PIT LANE  —  {spd_lbl}"
             pit_col = YELLOW
-        elif snap.lap_type == "IN LAP":
+        elif not is_race_sess and snap.lap_type == "IN LAP":
             pit_txt = "⬇  IN LAP  (pitting this lap)"
             pit_col = ORANGE
-        elif snap.lap_type == "OUT LAP":
+        elif not is_race_sess and snap.lap_type == "OUT LAP":
             pit_txt = "⬆  OUT LAP  (warm-up)"
             pit_col = ACCENT2
         else:
@@ -1914,36 +2001,68 @@ class F1Dashboard:
         self.lbl_lb_tyre_age.configure(
             text=f"Age: {tyre_age} laps  |  Pits: {pits_count}")
 
-        # ── Barra de desgaste del neumático ──────────────────────────────────
-        TYRE_MAX_LAPS = {"S": 20, "M": 35, "H": 50, "I": 30, "W": 40}
-        max_laps_tyre = TYRE_MAX_LAPS.get(t_raw.upper(), 40)
-        try:
-            age_int = int(tyre_age)
-        except Exception:
-            age_int = 0
-        wear_frac = clamp(age_int / max_laps_tyre, 0.0, 1.0)
+        # ── Tyre History bar ──────────────────────────────────────────────────
+        # Barra horizontal: cada stint es un bloque coloreado por compuesto.
+        # Cursor llantita (🏎/●) avanza sobre el stint actual.
+        # Compounds: S=rojo, M=amarillo, H=blanco/gris, I=verde, W=azul
+        COMPOUND_COL = {"S": "#cc0000", "M": "#ccaa00", "H": "#aaaaaa",
+                        "I": "#00aa44", "W": "#2299ff", "U": TEXT_SEC}
+        COMPOUND_DARK = {"S": "#550000", "M": "#554400", "H": "#444444",
+                         "I": "#003311", "W": "#003366", "U": "#222222"}
 
-        if wear_frac < 0.3:   wear_col = GREEN
-        elif wear_frac < 0.6: wear_col = YELLOW
-        elif wear_frac < 0.85: wear_col = ORANGE
-        else:                  wear_col = ACCENT
-
-        W_wear = self.cvs_lb_tyre_wear.winfo_width() or 200
-        H_wear = 14
+        W_tw = self.cvs_lb_tyre_wear.winfo_width() or 200
+        H_tw = 18
         self.cvs_lb_tyre_wear.delete("all")
-        self.cvs_lb_tyre_wear.create_rectangle(0, 0, W_wear, H_wear,
+        # Fondo
+        self.cvs_lb_tyre_wear.create_rectangle(0, 0, W_tw, H_tw,
             fill="#050505", outline="")
-        for frac in (0.25, 0.50, 0.75):
-            sx = int(W_wear * frac)
-            self.cvs_lb_tyre_wear.create_line(sx, 2, sx, H_wear-2,
-                fill="#333333", width=1)
-        fw_wear = max(0, int(W_wear * wear_frac))
-        if fw_wear > 0:
-            self.cvs_lb_tyre_wear.create_rectangle(0, 1, fw_wear, H_wear-1,
-                fill=wear_col, outline="")
-        self.cvs_lb_tyre_wear.create_text(W_wear // 2, H_wear // 2,
-            text=f"{int(wear_frac*100)}%  ({age_int}/{max_laps_tyre} L)",
-            fill=TEXT_PRI, font=(FONT, 7, "bold"))
+
+        drv_hist = self._laps_by_driver.get(self.selected_driver, pd.DataFrame()) \
+                   if self.selected_driver else pd.DataFrame()
+
+        total_laps_hist = max(self.total_laps, 1)
+        cursor_lap_f = snap.lap  # vuelta actual (float aprox)
+
+        if not drv_hist.empty and "Compound" in drv_hist.columns and "LapNumber" in drv_hist.columns:
+            laps_arr  = drv_hist["LapNumber"].to_numpy(dtype=float)
+            comp_arr  = drv_hist["Compound"].to_numpy()
+            tl_arr2   = drv_hist["TyreLife"].to_numpy() if "TyreLife" in drv_hist.columns else None
+
+            # Recorrer todas las vueltas y dibujar bloques
+            for li in range(len(laps_arr)):
+                ln = float(laps_arr[li])
+                if math.isnan(ln): continue
+                comp = str(comp_arr[li]).strip().upper()[:1]
+                if comp in ("N", "–", ""): comp = "U"
+
+                x0 = int((ln - 1) / total_laps_hist * W_tw)
+                x1 = int(ln / total_laps_hist * W_tw)
+                x1 = max(x1, x0 + 1)
+
+                col_main = COMPOUND_COL.get(comp, TEXT_SEC)
+                col_dark = COMPOUND_DARK.get(comp, "#222222")
+
+                # Bloque del stint — más oscuro si ya es pasado
+                past = (ln <= cursor_lap_f)
+                self.cvs_lb_tyre_wear.create_rectangle(x0, 2, x1, H_tw-2,
+                    fill=col_main if past else col_dark, outline="")
+
+            # Cursor llantita en la posición actual
+            cx_tyre = int(cursor_lap_f / total_laps_hist * W_tw)
+            cx_tyre = max(4, min(cx_tyre, W_tw - 4))
+            comp_now = t_raw.upper()[:1] if t_raw else "U"
+            dot_col  = COMPOUND_COL.get(comp_now, TEXT_PRI)
+            # Círculo negro con borde del color del compuesto
+            self.cvs_lb_tyre_wear.create_oval(cx_tyre-5, 1, cx_tyre+5, H_tw-1,
+                fill="#000000", outline=dot_col, width=2)
+            # Punto central
+            self.cvs_lb_tyre_wear.create_oval(cx_tyre-2, H_tw//2-2, cx_tyre+2, H_tw//2+2,
+                fill=dot_col, outline="")
+        else:
+            # Sin datos — solo cursor simple
+            cx_tyre = int(cursor_lap_f / total_laps_hist * W_tw) if total_laps_hist > 1 else 0
+            self.cvs_lb_tyre_wear.create_oval(cx_tyre-4, 1, cx_tyre+4, H_tw-1,
+                fill=YELLOW, outline="#000000", width=1)
 
         # ── ERS Battery bar ───────────────────────────────────────────────────
         pct = snap.ers_soc
@@ -2058,11 +2177,11 @@ class F1Dashboard:
                 diff = cur_s - prev_s if cur_s and prev_s else 0.
                 verdict = "–"
                 if cur_s and prev_s:
-                    if diff <= -0.3:   verdict = "FLYING LAP ↑"
-                    elif diff <= -0.1: verdict = "On it ▲"
+                    if diff <= -0.3:   verdict = "Improving ↑↑"
+                    elif diff <= -0.1: verdict = "Improving ↑"
                     elif diff <= 0.1:  verdict = "On Pace"
-                    elif diff <= 0.4:  verdict = "Gap ▼"
-                    else:              verdict = "Dropping Back ↓"
+                    elif diff <= 0.4:  verdict = "Losing time ↓"
+                    else:              verdict = "Dropping ↓↓"
 
                 sec_cond = "1"
                 if lap_start_abs is not None and \
@@ -2073,10 +2192,6 @@ class F1Dashboard:
                     past_idx = int(np.searchsorted(self._ts_times, sec_abs, side='right')) - 1
                     if past_idx >= 0:
                         sec_cond = str(self.track_status_df["Status"].iloc[past_idx])
-
-                cond_map = {"1":"GREEN","2":"YELLOW","3":"SC YEL",
-                            "4":"SC","5":"RED","6":"VSC","7":"VSC END"}
-                cond_lbl = cond_map.get(sec_cond, "GREEN")
 
                 if   sec_cond == "4":         row_tag = "sc_active"
                 elif sec_cond == "6":         row_tag = "vsc_active"
@@ -2094,10 +2209,10 @@ class F1Dashboard:
                     values=(f"S{s_idx}",
                             f"{cur_s:.3f}" if cur_s else "–",
                             f"{diff:+.3f}" if diff else "–",
-                            verdict, cond_lbl),
+                            verdict),
                     tags=(row_tag,))
 
-            # ── Avg sector times desde vueltas completadas ────────────────────
+            # ── Avg row dentro de la tabla como fila 4 ────────────────────────
             avg_vals = []
             for s_idx2 in range(1, 4):
                 col2 = f"Sector{s_idx2}Time"
@@ -2107,12 +2222,15 @@ class F1Dashboard:
                     avg_vals.append(f"{float(np.mean(valid2[-5:])):.3f}" if len(valid2) else "–")
                 else:
                     avg_vals.append("–")
-            self.lbl_sec_avg.configure(
-                text=f"Avg S1/S2/S3: {avg_vals[0]} / {avg_vals[1]} / {avg_vals[2]}")
+            self.tree_sec.insert("", "end",
+                values=("AVG", avg_vals[0], avg_vals[1], avg_vals[2]),
+                tags=("avg_row",))
+            self.lbl_sec_avg.configure(text=f"5-lap: {avg_vals[0]} / {avg_vals[1]} / {avg_vals[2]}")
 
         pace_txt, pace_col = "–", TEXT_SEC
         last_str, delta_str = "–", "–"
         diag_parts: List[str] = []
+        insights: List[str] = []
 
         if not completed.empty:
             lt_arr = completed["LapTime"].to_numpy(dtype=float)
@@ -2123,11 +2241,51 @@ class F1Dashboard:
                 if self.session_best_s:
                     delta_str = f"{ll_s - self.session_best_s:+.3f}s"
                 if len(valid) >= 2:
-                    avg  = float(np.mean(valid[-6:-1]))
+                    recent5 = valid[-min(6, len(valid)):-1]
+                    avg = float(np.mean(recent5)) if len(recent5) else ll_s
                     diff = ll_s - avg
-                    pace_txt = (f"IMPROVING ({diff:+.2f}s)" if diff < 0
-                                else f"DROPPING ({diff:+.2f}s)")
-                    pace_col = GREEN if diff < 0 else ACCENT
+                    if diff < -0.5:
+                        pace_txt = f"FLYING ↑↑ ({diff:+.2f}s)"
+                        pace_col = F1_PURPLE
+                    elif diff < 0:
+                        pace_txt = f"IMPROVING ↑ ({diff:+.2f}s)"
+                        pace_col = GREEN
+                    elif diff < 0.3:
+                        pace_txt = f"CONSISTENT ({diff:+.2f}s)"
+                        pace_col = TEXT_PRI
+                    else:
+                        pace_txt = f"DROPPING ↓ ({diff:+.2f}s)"
+                        pace_col = ACCENT
+
+                # ── Tyre degradation insight ──────────────────────────────────
+                if len(valid) >= 3:
+                    trend = np.polyfit(range(len(valid[-5:])), valid[-5:], 1)[0]
+                    if trend > 0.15:
+                        insights.append(f"⚠ Tyre deg +{trend:.2f}s/L")
+                    elif trend > 0.05:
+                        insights.append(f"🔴 Tyre wearing ({trend:.2f}s/L)")
+
+                # ── ERS insight ───────────────────────────────────────────────
+                if is_2026_era(self.session_year):
+                    soc_now = snap.ers_soc
+                    if snap.is_clipping:
+                        insights.append("⚡ SUPERCLIPPING — recharging")
+                    elif soc_now < 15:
+                        insights.append(f"⚡ ERS critical ({soc_now:.0f}%)")
+                    elif soc_now > 80:
+                        insights.append(f"🔋 ERS full ({soc_now:.0f}%) — save mode?")
+
+                # ── Blue flag / traffic insight ───────────────────────────────
+                snaps_now = getattr(self, '_last_snaps', [])
+                sel_snap  = next((s for s in snaps_now if s.drv == drv), None)
+                if sel_snap:
+                    for other in snaps_now:
+                        if other.drv == drv: continue
+                        if other.lap > sel_snap.lap + 0 and other.int_num < 3.0:
+                            insights.append(f"🔵 Blue flag: {other.abbr} closing")
+                            break
+                    if not snap.is_out and sel_snap.int_num < 1.5 and sel_snap.int_num > 0:
+                        insights.append(f"⚔ Tight battle ahead")
 
         self.lbl_pace.configure(text=f"Pace (5L avg): {pace_txt}", fg=pace_col)
         best_s = fmt_lap(self.session_best_s) if self.session_best_s else "–"
@@ -2228,8 +2386,10 @@ class F1Dashboard:
             else:
                 self.lbl_diag.configure(
                     text="⚡ Clipping: " + "  ".join(diag_parts[-3:]), fg=ACCENT2)
+        elif insights:
+            self.lbl_diag.configure(text="  |  ".join(insights[:3]), fg=ACCENT2)
         else:
-            self.lbl_diag.configure(text="Behaviour: Normal — no anomalies detected", fg=ACCENT2)
+            self.lbl_diag.configure(text="✅ Normal behaviour — no anomalies", fg=TEXT_SEC)
 
     # ════════════════════════════════════════════════════════════════════════
     #  GRÁFICA DE TELEMETRÍA — Reescrita con marcadores SM/OM/⚡SC/L&C
@@ -2260,10 +2420,11 @@ class F1Dashboard:
                 return
 
             lap_times_arr = self._lap_times.get(drv, np.array([]))
-            if len(lap_times_arr) == 0:
-                return
+            # No salir si aún no hay vueltas completadas — mostrar desde inicio de telemetría
 
             t_vals   = self._tel_times[drv]
+            if len(t_vals) < 3:
+                return
             tsf_arr  = drv_laps["TimeSec_f"].to_numpy(dtype=float)
             lt_arr   = drv_laps["LapTime"].to_numpy(dtype=float) \
                        if "LapTime" in drv_laps.columns else None
@@ -2271,27 +2432,32 @@ class F1Dashboard:
                          if "LapNumber" in drv_laps.columns else None
 
             # ── Determinar inicio de la vuelta actual ──────────────────────
-            idx_cur = int(np.searchsorted(lap_times_arr, abs_t, side='right'))
-            idx_cur = min(idx_cur, len(lap_times_arr) - 1)
+            if len(lap_times_arr) > 0:
+                idx_cur = int(np.searchsorted(lap_times_arr, abs_t, side='right'))
+                idx_cur = min(idx_cur, len(lap_times_arr) - 1)
+            else:
+                idx_cur = 0
 
-            if idx_cur > 0 and lt_arr is not None:
+            if idx_cur > 0 and lt_arr is not None and len(tsf_arr) > idx_cur - 1:
                 prev_end = float(tsf_arr[idx_cur - 1])
                 prev_lt  = float(lt_arr[idx_cur - 1])
                 if not math.isnan(prev_end) and not math.isnan(prev_lt):
                     lap_abs_start = prev_end
                 else:
-                    lap_abs_start = abs_t - 90.0
+                    lap_abs_start = float(t_vals[0])
             else:
-                lap_abs_start = float(tsf_arr[0]) if len(tsf_arr) > 0 else abs_t - 90.0
+                # Vuelta 1 o sin datos de lap: inicio real de telemetría
+                lap_abs_start = float(t_vals[0])
 
             lap_abs_end = abs_t
 
-            if lt_arr is not None and idx_cur > 0:
+            if lt_arr is not None and idx_cur > 0 and len(lt_arr) > idx_cur - 1:
                 ref_laptime = float(lt_arr[idx_cur - 1])
                 if math.isnan(ref_laptime) or ref_laptime <= 0:
-                    ref_laptime = 120.0
+                    ref_laptime = max(60.0, abs_t - lap_abs_start)
             else:
-                ref_laptime = 120.0
+                # Vuelta 1: usar tiempo transcurrido como referencia
+                ref_laptime = max(60.0, abs_t - lap_abs_start)
 
             si = int(np.searchsorted(t_vals, lap_abs_start, side='left'))
             ei = int(np.searchsorted(t_vals, lap_abs_end,   side='right'))
@@ -2655,4 +2821,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
