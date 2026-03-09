@@ -1,29 +1,7 @@
 """
-F1 Pro Dashboard  v4.4  — ERS 2026 + Plot mejorado + PIT events
+F1 Pro Dashboard  v4.4
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FIXES v4.4.0:
-  · BUG: "#ffffff55" → tkinter no soporta alfa en hex; reemplazado por blanco sólido.
-  · FIX: Weather label redimensionado para caber correctamente.
-  · FIX: Deploy/Regen en Race Administration ahora muestran kW instantáneo (no kJ acumulado).
-  · FIX: Superclipping detectado por RPM sin bajar + velocidad bajando (no solo SOC).
-  · NUEVO: Barra de desgaste de neumático en Race Administration (negro→color según laps).
-  · NUEVO: Sectors vs Previous Lap fusionado con Pace & Analysis en panel único mejorado.
-  · NUEVO: Tyre/Age/Pits movidos a Race Administration; columna Avg Sector en panel análisis.
-  · NUEVO: Tabla de sectores ampliada: S/Time/Δ/Verdict/Cond + Tyre + AvgS.
-FIXES v4.3.0:
-  · BUG CRÍTICO: cur_lap_i se usaba ANTES de ser definido → tyre/compound
-    nunca se asignaba, lo que rompía Interval, Gap y Compound display.
-  · BUG: Fallback pit detection (speed<=82) causaba falsos positivos
-    en chicanes. Ahora solo activa si PitInTime data confirma.
-  · ERS 2026: Modelo físico corregido — regen en frenadas 350 kW (no 170).
-    Superclipping: cuando SOC=0 en WOT el ICE intenta recargar → se detecta
-    y muestra en telemetry plot con icono "⚡SC" en banda superior.
-  · TELEMETRY PLOT: Banda superior con iconos SM/OM/SC/LC en lugar de
-    solo colores. Marcador de superclipping en rojo pulsante.
-  · PIT EVENTS: Notificación de cambio de compuesto arreglada (usaba
-    tyre_prev con idx erróneo). Banner PIT LIMITER solo en Race Administration.
-  · OUT LAP / IN LAP / PUSH LAP: lógica corregida en Qualy y FP.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 import tkinter as tk
 from tkinter import ttk, Canvas, messagebox
@@ -2677,3 +2655,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
